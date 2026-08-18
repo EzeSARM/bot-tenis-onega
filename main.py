@@ -10,11 +10,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8679048960:AAHNy7YqRGx1Bt-oeK
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8295036704")
 
 NOMBRE_POLIDEPORTIVO = "Polideportivo Onega"
-SEDE_ID = "2279"  # Reemplaza por el SEDE_ID exacto de Onega si difiere de Colegiales
+SEDE_ID = "2279"  # Reemplaza por el SEDE_ID específico de Onega si difiere
 DIAS_A_CONSULTAR = 30  # Revisa los próximos 30 días
 
-# CONFIGURACIÓN DE CANCHAS
-# Ajusta los servicio_id con los IDs reales de Onega obtenidos desde la web de SIGECI
+# CONFIGURACIÓN DE CANCHAS (Agrega o edita los servicio_id según las canchas de Onega)
 CANCHAS = [
     {
         "nombre": "Cancha 1",
@@ -29,6 +28,7 @@ CANCHAS = [
 ]
 
 # Memoria global para no reenviar el mismo turno si ya fue notificado
+# Estructura: "NOMBRE_CANCHA|FECHA|HORA"
 TURNOS_NOTIFICADOS = set()
 
 DIAS_SEMANA = {
@@ -45,7 +45,7 @@ DIAS_SEMANA = {
 def formatear_horarios(fecha_str, lista_iso):
     """
     Convierte fechas y horas ISO en formato claro: 'Lunes 24/08: 13:00 hs'
-    y devuelve identificadores únicos para la memoria de notificaciones.
+    y devuelve identificadores únicos para evitar alertas repetidas.
     """
     lineas_texto = []
     claves_turnos = []
@@ -58,18 +58,13 @@ def formatear_horarios(fecha_str, lista_iso):
         horas_limpias = []
         for item in lista_iso:
             try:
-                # Si viene una fecha ISO completa (ej: "2026-08-24T13:00:00")
-                dt_hora = datetime.strptime(str(item).split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                dt_hora = datetime.strptime(item.split(".")[0], "%Y-%m-%dT%H:%M:%S")
                 hora_str = dt_hora.strftime("%H:%M hs")
                 horas_limpias.append(hora_str)
                 claves_turnos.append((fecha_str, hora_str))
             except Exception:
-                # Si viene una hora simple (ej: "13:00")
-                hora_str = str(item).strip()
-                if not hora_str.endswith("hs"):
-                    hora_str += " hs"
-                horas_limpias.append(hora_str)
-                claves_turnos.append((fecha_str, hora_str))
+                horas_limpias.append(str(item))
+                claves_turnos.append((fecha_str, str(item)))
 
         texto = f"📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas_limpias)}"
         return texto, claves_turnos
@@ -88,7 +83,7 @@ def enviar_mensaje_telegram(mensaje):
 
 
 def consultar_cancha(cancha):
-    """Consulta la API de SIGECI y alerta únicamente ante turnos nuevos válidos."""
+    """Consulta la API de SIGECI y alerta únicamente ante turnos nuevos."""
     global TURNOS_NOTIFICADOS
 
     headers = {
@@ -121,33 +116,26 @@ def consultar_cancha(cancha):
                 except Exception:
                     datos = []
 
-                # FILTRADO ESTRICTO DE FALSOS POSITIVOS:
-                # Se descartan elementos vacíos, "null", espacios en blanco o listas vacías.
-                if datos and isinstance(datos, list):
-                    datos_validos = [
-                        item for item in datos 
-                        if item and str(item).strip() != "" and str(item).lower() != "null"
-                    ]
+                if datos and isinstance(datos, list) and len(datos) > 0:
+                    texto_linea, claves = formatear_horarios(fecha_str, datos)
 
-                    if len(datos_validos) > 0:
-                        texto_linea, claves = formatear_horarios(fecha_str, datos_validos)
+                    # Registrar los turnos libres en esta ejecución
+                    for f, h in claves:
+                        clave_unica = f"{cancha['nombre']}|{f}|{h}"
+                        turnos_visibles_hoy.add(clave_unica)
 
-                        # Registrar cada turno visible
-                        for f, h in claves:
-                            clave_unica = f"{cancha['nombre']}|{f}|{h}"
-                            turnos_visibles_hoy.add(clave_unica)
+                        # Detectar si no fue notificado anteriormente
+                        if clave_unica not in TURNOS_NOTIFICADOS:
+                            turnos_nuevos_detectados.append(clave_unica)
 
-                            if clave_unica not in TURNOS_NOTIFICADOS:
-                                turnos_nuevos_detectados.append(clave_unica)
-
-                        lineas_resumen.append(texto_linea)
+                    lineas_resumen.append(texto_linea)
 
         except Exception as e:
             print(f"Error consultando {cancha['nombre']} para el día {fecha_str}: {e}")
 
         time.sleep(0.2)
 
-    # Limpiar de la memoria los turnos que ya no estén disponibles
+    # Limpiar de la memoria los turnos que ya no estén disponibles (por reserva)
     turnos_a_remover = [
         t for t in TURNOS_NOTIFICADOS 
         if t.startswith(f"{cancha['nombre']}|") and t not in turnos_visibles_hoy
@@ -155,7 +143,7 @@ def consultar_cancha(cancha):
     for t in turnos_a_remover:
         TURNOS_NOTIFICADOS.remove(t)
 
-    # Notificar únicamente si se detectan turnos NUEVOS y VÁLIDOS
+    # Si hay turnos totalmente nuevos, enviar notificación
     if turnos_nuevos_detectados:
         resumen_turnos = "\n".join(lineas_resumen)
         mensaje = (
@@ -182,7 +170,7 @@ if __name__ == "__main__":
     print(f"Iniciando monitoreo de {NOMBRE_POLIDEPORTIVO} para: {nombres_canchas}...")
 
     enviar_mensaje_telegram(
-        f"🚀 <b>Bot Activo:</b> Monitoreando {NOMBRE_POLIDEPORTIVO} ({nombres_canchas}) sin alertas falsas ni repetidas (cada 5 min)."
+        f"🚀 <b>Bot Activo:</b> Monitoreando {NOMBRE_POLIDEPORTIVO} ({nombres_canchas}) sin alertas repetidas cada 5 min."
     )
 
     while True:
