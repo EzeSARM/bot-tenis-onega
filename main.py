@@ -6,9 +6,9 @@ TELEGRAM_TOKEN = os.environ.get("8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M"
 TELEGRAM_CHAT_ID = os.environ.get("8295036704")
 ID_PRESTACION = "3137"
 
-# URL actualizada de la vista de turnos de SIGECI
-URL_BASE = "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite"
-URL_OBTENER_FECHAS = f"{URL_BASE}/ObtenerFechas"
+URL_TRAMITE = (
+    f"https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion={ID_PRESTACION}"
+)
 
 
 def enviar_mensaje_telegram(mensaje):
@@ -22,80 +22,63 @@ def enviar_mensaje_telegram(mensaje):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error enviando mensaje: {e}")
+        print(f"Error enviando mensaje a Telegram: {e}")
 
 
 def consultar_turnos():
-    """Consulta la disponibilidad de turnos con sesión y encabezados completos."""
-    session = requests.Session()
-
-    # Encabezados para simular una navegación real en navegador
+    """Analiza la página principal del trámite para detectar disponibilidad."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{URL_BASE}?idPrestacion={ID_PRESTACION}",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9",
     }
 
     try:
-        # 1. Petición previa a la página principal para establecer galletas de sesión (Cookies)
-        session.get(
-            f"{URL_BASE}?idPrestacion={ID_PRESTACION}",
-            headers=headers,
-            timeout=15,
-        )
-
-        # 2. Petición a la API para obtener fechas
-        params = {"idPrestacion": ID_PRESTACION}
-
-        response = session.get(
-            URL_OBTENER_FECHAS, params=params, headers=headers, timeout=15
-        )
+        response = requests.get(URL_TRAMITE, headers=headers, timeout=15)
 
         if response.status_code == 200:
-            try:
-                datos = response.json()
-                if datos and len(datos) > 0:
-                    mensaje = (
-                        "🎾 <b>¡HAY TURNOS DISPONIBLES EN ONEGA!</b> 🎾\n\n"
-                        "Se encontraron fechas libres.\n"
-                        "Ingresa rápido para reservar:\n"
-                        f"{URL_BASE}?idPrestacion={ID_PRESTACION}"
-                    )
-                    enviar_mensaje_telegram(mensaje)
-                    print("¡Turnos encontrados! Notificación enviada.")
-                else:
-                    print("No hay turnos disponibles por el momento.")
-            except Exception:
-                # Si responde 200 pero la respuesta es texto HTML plano
-                if "No hay turnos" not in response.text:
-                    print(
-                        "Respuesta con formato inusual. Verificando contenido..."
-                    )
-                else:
-                    print("No hay turnos disponibles por el momento.")
+            contenido = response.text.lower()
 
-        elif response.status_code == 404:
-            print(
-                "Error 404: La ruta interna cambió. Revisa los logs de Railway."
+            # Frases típicas que indican que NO hay turnos
+            sin_turnos_indicadores = [
+                "no hay turnos disponibles",
+                "no existen turnos disponibles",
+                "no se encontraron turnos",
+                "en este momento no hay turnos",
+            ]
+
+            # Verificamos si alguna de las frases de "sin turnos" está presente
+            hay_cartel_sin_turnos = any(
+                frase in contenido for frase in sin_turnos_indicadores
             )
+
+            if not hay_cartel_sin_turnos:
+                mensaje = (
+                    "🎾 <b>¡HAY TURNOS DISPONIBLES EN ONEGA!</b> 🎾\n\n"
+                    "El sistema no muestra el aviso de 'sin turnos'.\n"
+                    "Ingresa rápido para reservar:\n"
+                    f"{URL_TRAMITE}"
+                )
+                enviar_mensaje_telegram(mensaje)
+                print("¡Posibles turnos detectados! Notificación enviada.")
+            else:
+                print("No hay turnos disponibles por el momento.")
+
         else:
-            print(
-                f"La web de la ciudad respondió con estado: {response.status_code}"
-            )
+            print(f"La web de SIGECI respondió con estado: {response.status_code}")
 
     except Exception as e:
-        print(f"Error al consultar la web: {e}")
+        print(f"Error al conectar con la web de la Ciudad: {e}")
 
 
 if __name__ == "__main__":
-    print("Iniciando bot de monitoreo continuo...")
-    enviar_mensaje_telegram("🚀 El bot ha actualizado su conexión y está activo.")
+    print("Iniciando monitoreo de turnos de tenis en Polideportivo Onega...")
+    enviar_mensaje_telegram("🚀 Bot de tenis reactivado con escaneo directo de la web.")
 
     while True:
         consultar_turnos()
-        time.sleep(300)
+        time.sleep(300)  # Revisa cada 5 minutos
