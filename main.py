@@ -2,8 +2,8 @@ import os
 import time
 import requests
 
-TELEGRAM_TOKEN = os.environ.get("8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M")
-TELEGRAM_CHAT_ID = os.environ.get("8295036704")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ID_PRESTACION = "3137"
 
 URL_TRAMITE = (
