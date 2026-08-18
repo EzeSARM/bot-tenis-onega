@@ -1,9 +1,9 @@
 import os
+import time
 import requests
 
-# Render permite guardar las claves de forma segura mediante variables de entorno
-TELEGRAM_TOKEN = os.environ.get("8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M")
-TELEGRAM_CHAT_ID = os.environ.get("8295036704")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ID_PRESTACION = "3137"
 
 URL_SIGECI = (
@@ -65,5 +65,10 @@ def consultar_turnos():
 
 
 if __name__ == "__main__":
-    print("Ejecutando revisión de turnos...")
-    consultar_turnos()
+    print("Iniciando bot de monitoreo continuo...")
+    enviar_mensaje_telegram("🚀 El bot ha iniciado el monitoreo continuo.")
+
+    # Revisa cada 5 minutos (300 segundos) de forma indefinida
+    while True:
+        consultar_turnos()
+        time.sleep(300)
