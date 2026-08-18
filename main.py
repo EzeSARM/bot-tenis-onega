@@ -116,8 +116,12 @@ def consultar_cancha(cancha):
                 except Exception:
                     datos = []
 
-                if datos and isinstance(datos, list) and len(datos) > 0:
-                    texto_linea, claves = formatear_horarios(fecha_str, datos)
+                if datos and isinstance(datos, list):
+                    # Filtrar solo elementos válidos que contengan una hora real (evita "", None, "null", etc.)
+                    datos_validos = [item for item in datos if item and str(item).strip() != ""]
+
+                    if len(datos_validos) > 0:
+                        texto_linea, claves = formatear_horarios(fecha_str, datos_validos)
 
                     # Registrar los turnos libres en esta ejecución
                     for f, h in claves:
