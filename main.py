@@ -1,6 +1,6 @@
-import re
 import time
 import requests
+from bs4 import BeautifulSoup
 
 TELEGRAM_TOKEN = "8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M"
 TELEGRAM_CHAT_ID = "8295036704"
@@ -19,8 +19,8 @@ def enviar_mensaje_telegram(mensaje):
         print(f"Error enviando mensaje a Telegram: {e}")
 
 
-def consultar_turnos_estables():
-    """Analiza la página principal buscando fechas y horarios sin consumir endpoints protegidos."""
+def consultar_turnos_exactos():
+    """Analiza estrictamente los selectores del calendario para evitar falsos positivos."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -35,61 +35,64 @@ def consultar_turnos_estables():
         response = requests.get(URL_TRAMITE, headers=headers, timeout=15)
 
         if response.status_code == 200:
-            html = response.text
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            # Frases que confirman que la agenda está cerrada o sin cupos
-            frases_sin_turnos = [
-                "no hay turnos disponibles",
-                "no existen turnos disponibles",
-                "sin turnos disponibles",
-                "no se encontraron turnos",
-            ]
-
-            sin_turnos = any(
-                frase in html.lower() for frase in frases_sin_turnos
+            # 1. Buscar si la página muestra explícitamente la alerta de "Sin Turnos"
+            alerta_sin_turnos = soup.find(id="divSinTurnos") or soup.find(
+                class_="alert-warning"
             )
 
-            # Extraer fechas visibles en formato DD/MM/YYYY o YYYY-MM-DD mediante expresión regular
-            fechas_encontradas = re.findall(
-                r"\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", html
+            # Si el elemento de alerta está visible en pantalla, no hay turnos
+            if alerta_sin_turnos and "no hay turnos" in alerta_sin_turnos.text.lower():
+                print("Verificación OK: No hay turnos disponibles actualmente.")
+                return
+
+            # 2. Buscar días habilitados en el calendario interactivo (días con clase 'day' o 'disponible' que no estén deshabilitados)
+            dias_habilitados = soup.find_all(
+                "td", class_=lambda c: c and "day" in c and "disabled" not in c
             )
-            # Eliminar duplicados
-            fechas_unicas = list(set(fechas_encontradas))
 
-            # Extraer posibles horarios (formatos HH:MM)
-            horarios_encontrados = re.findall(
-                r"\b(?:[01]?\d|2[03]):[05]0\b", html
-            )
-            horarios_unicos = list(set(horarios_encontrados))
+            # 3. Buscar selectores de horas activas en el formulario
+            combo_horarios = soup.find("select", id="idHorario")
+            opciones_horas = []
+            if combo_horarios:
+                opciones_horas = [
+                    opt.text.strip()
+                    for opt in combo_horarios.find_all("option")
+                    if opt.get("value") and opt.get("value") != ""
+                ]
 
-            if not sin_turnos or len(fechas_unicas) > 0:
-                mensaje = "🎾 <b>¡TURNOS DETECTADOS EN POLIDEPORTIVO ONEGA!</b> 🎾\n\n"
-
-                if fechas_unicas:
-                    mensaje += f"📅 <b>Fechas detectadas:</b> {', '.join(fechas_unicas[:5])}\n"
-                if horarios_unicos:
-                    mensaje += f"⏰ <b>Horarios aproximados:</b> {', '.join(horarios_unicos[:6])}\n"
-
-                mensaje += f"\n🔗 <a href='{URL_TRAMITE}'>Ingresar rápido a reservar en SIGECI</a>"
+            # Solo notificar si se detectan días activos en el calendario o lista de horas reales
+            if dias_habilitados or opciones_horas:
+                fechas = [d.text.strip() for d in dias_habilitados if d.text.strip()]
+                
+                mensaje = "🎾 <b>¡TURNO DISPONIBLE EN ONEGA!</b> 🎾\n\n"
+                
+                if fechas:
+                    mensaje += f"📅 <b>Días libres en el calendario:</b> {', '.join(fechas)}\n"
+                if opciones_horas:
+                    mensaje += f"⏰ <b>Horarios a reservar:</b> {', '.join(opciones_horas)}\n"
+                
+                mensaje += f"\n🔗 <a href='{URL_TRAMITE}'>RESERVAR AHORA EN SIGECI</a>"
 
                 enviar_mensaje_telegram(mensaje)
-                print(
-                    "¡Notificación enviada a Telegram! Se detectó disponibilidad."
-                )
+                print("¡ALERTA REAL ENVIADA! Se encontraron turnos habilitados.")
             else:
-                print("Consulta exitosa (Estado 200): No hay turnos en este momento.")
+                print("Verificación OK: Sin días habilitados en el calendario.")
 
         else:
-            print(f"Respuesta inesperada de SIGECI: Estado {response.status_code}")
+            print(f"Error de servidor SIGECI: {response.status_code}")
 
     except Exception as e:
-        print(f"Error durante la verificación: {e}")
+        print(f"Error procesando la página: {e}")
 
 
 if __name__ == "__main__":
-    print("Servidor activo. Monitoreando Polideportivo Onega cada 5 minutos...")
-    enviar_mensaje_telegram("🚀 Bot de tenis activo con modo de escaneo estable.")
+    print("Iniciando monitoreo estricto de precisión para Polideportivo Onega...")
+    enviar_mensaje_telegram(
+        "🚀 Bot actualizado con filtro anti-falsos positivos. Listo para monitorear."
+    )
 
     while True:
-        consultar_turnos_estables()
-        time.sleep(300)
+        consultar_turnos_exactos()
+        time.sleep(300)  # Revisa cada 5 minutos
