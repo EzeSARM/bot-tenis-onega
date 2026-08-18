@@ -1,16 +1,79 @@
+import os
 import time
 import requests
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
-TELEGRAM_TOKEN = "8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M"
-TELEGRAM_CHAT_ID = "8295036704"
-ID_PRESTACION = "3137"
+# ==========================================
+# CONFIGURACIÓN Y CREDENCIALES
+# ==========================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8295036704")
 
-URL_TRAMITE = f"https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion={ID_PRESTACION}"
+NOMBRE_POLIDEPORTIVO = "Polideportivo Onega"
+SEDE_ID = "2279"  # Reemplaza por el SEDE_ID específico de Onega si difiere
+DIAS_A_CONSULTAR = 30  # Revisa los próximos 30 días
+
+# CONFIGURACIÓN DE CANCHAS (Agrega o edita los servicio_id según las canchas de Onega)
+CANCHAS = [
+    {
+        "nombre": "Cancha 1",
+        "servicio_id": "3149",  # Reemplaza por el ID de la Cancha 1 de Onega
+        "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3149"
+    },
+    {
+        "nombre": "Cancha 2",
+        "servicio_id": "3150",  # Reemplaza por el ID de la Cancha 2 de Onega
+        "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3150"
+    }
+]
+
+# Memoria global para no reenviar el mismo turno si ya fue notificado
+# Estructura: "NOMBRE_CANCHA|FECHA|HORA"
+TURNOS_NOTIFICADOS = set()
+
+DIAS_SEMANA = {
+    "Monday": "Lunes",
+    "Tuesday": "Martes",
+    "Wednesday": "Miércoles",
+    "Thursday": "Jueves",
+    "Friday": "Viernes",
+    "Saturday": "Sábado",
+    "Sunday": "Domingo"
+}
+
+
+def formatear_horarios(fecha_str, lista_iso):
+    """
+    Convierte fechas y horas ISO en formato claro: 'Lunes 24/08: 13:00 hs'
+    y devuelve identificadores únicos para evitar alertas repetidas.
+    """
+    lineas_texto = []
+    claves_turnos = []
+
+    try:
+        dt_fecha = datetime.strptime(fecha_str, "%Y-%m-%d")
+        dia_nombre = DIAS_SEMANA.get(dt_fecha.strftime("%A"), dt_fecha.strftime("%A"))
+        fecha_corta = dt_fecha.strftime("%d/%m")
+
+        horas_limpias = []
+        for item in lista_iso:
+            try:
+                dt_hora = datetime.strptime(item.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                hora_str = dt_hora.strftime("%H:%M hs")
+                horas_limpias.append(hora_str)
+                claves_turnos.append((fecha_str, hora_str))
+            except Exception:
+                horas_limpias.append(str(item))
+                claves_turnos.append((fecha_str, str(item)))
+
+        texto = f"📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas_limpias)}"
+        return texto, claves_turnos
+    except Exception:
+        return f"📅 <b>{fecha_str}:</b> {lista_iso}", [(fecha_str, str(lista_iso))]
 
 
 def enviar_mensaje_telegram(mensaje):
-    """Envía una notificación a Telegram."""
+    """Envía una notificación al chat de Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
     try:
@@ -19,80 +82,100 @@ def enviar_mensaje_telegram(mensaje):
         print(f"Error enviando mensaje a Telegram: {e}")
 
 
-def consultar_turnos_exactos():
-    """Analiza estrictamente los selectores del calendario para evitar falsos positivos."""
+def consultar_cancha(cancha):
+    """Consulta la API de SIGECI y alerta únicamente ante turnos nuevos."""
+    global TURNOS_NOTIFICADOS
+
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
     }
 
-    try:
-        response = requests.get(URL_TRAMITE, headers=headers, timeout=15)
+    hoy = datetime.now()
+    lineas_resumen = []
+    turnos_nuevos_detectados = []
+    turnos_visibles_hoy = set()
 
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
+    for i in range(DIAS_A_CONSULTAR):
+        fecha_str = (hoy + timedelta(days=i)).strftime("%Y-%m-%d")
 
-            # 1. Buscar si la página muestra explícitamente la alerta de "Sin Turnos"
-            alerta_sin_turnos = soup.find(id="divSinTurnos") or soup.find(
-                class_="alert-warning"
-            )
+        api_url = "https://formulario-sigeci.buenosaires.gob.ar/getHorasDisp"
+        params = {
+            "day": fecha_str,
+            "sedeId": SEDE_ID,
+            "servicioId": cancha["servicio_id"]
+        }
 
-            # Si el elemento de alerta está visible en pantalla, no hay turnos
-            if alerta_sin_turnos and "no hay turnos" in alerta_sin_turnos.text.lower():
-                print("Verificación OK: No hay turnos disponibles actualmente.")
-                return
+        try:
+            response = requests.get(api_url, headers=headers, params=params, timeout=10)
 
-            # 2. Buscar días habilitados en el calendario interactivo (días con clase 'day' o 'disponible' que no estén deshabilitados)
-            dias_habilitados = soup.find_all(
-                "td", class_=lambda c: c and "day" in c and "disabled" not in c
-            )
+            if response.status_code == 200:
+                try:
+                    datos = response.json()
+                except Exception:
+                    datos = []
 
-            # 3. Buscar selectores de horas activas en el formulario
-            combo_horarios = soup.find("select", id="idHorario")
-            opciones_horas = []
-            if combo_horarios:
-                opciones_horas = [
-                    opt.text.strip()
-                    for opt in combo_horarios.find_all("option")
-                    if opt.get("value") and opt.get("value") != ""
-                ]
+                if datos and isinstance(datos, list) and len(datos) > 0:
+                    texto_linea, claves = formatear_horarios(fecha_str, datos)
 
-            # Solo notificar si se detectan días activos en el calendario o lista de horas reales
-            if dias_habilitados or opciones_horas:
-                fechas = [d.text.strip() for d in dias_habilitados if d.text.strip()]
-                
-                mensaje = "🎾 <b>¡TURNO DISPONIBLE EN ONEGA!</b> 🎾\n\n"
-                
-                if fechas:
-                    mensaje += f"📅 <b>Días libres en el calendario:</b> {', '.join(fechas)}\n"
-                if opciones_horas:
-                    mensaje += f"⏰ <b>Horarios a reservar:</b> {', '.join(opciones_horas)}\n"
-                
-                mensaje += f"\n🔗 <a href='{URL_TRAMITE}'>RESERVAR AHORA EN SIGECI</a>"
+                    # Registrar los turnos libres en esta ejecución
+                    for f, h in claves:
+                        clave_unica = f"{cancha['nombre']}|{f}|{h}"
+                        turnos_visibles_hoy.add(clave_unica)
 
-                enviar_mensaje_telegram(mensaje)
-                print("¡ALERTA REAL ENVIADA! Se encontraron turnos habilitados.")
-            else:
-                print("Verificación OK: Sin días habilitados en el calendario.")
+                        # Detectar si no fue notificado anteriormente
+                        if clave_unica not in TURNOS_NOTIFICADOS:
+                            turnos_nuevos_detectados.append(clave_unica)
 
-        else:
-            print(f"Error de servidor SIGECI: {response.status_code}")
+                    lineas_resumen.append(texto_linea)
 
-    except Exception as e:
-        print(f"Error procesando la página: {e}")
+        except Exception as e:
+            print(f"Error consultando {cancha['nombre']} para el día {fecha_str}: {e}")
+
+        time.sleep(0.2)
+
+    # Limpiar de la memoria los turnos que ya no estén disponibles (por reserva)
+    turnos_a_remover = [
+        t for t in TURNOS_NOTIFICADOS 
+        if t.startswith(f"{cancha['nombre']}|") and t not in turnos_visibles_hoy
+    ]
+    for t in turnos_a_remover:
+        TURNOS_NOTIFICADOS.remove(t)
+
+    # Si hay turnos totalmente nuevos, enviar notificación
+    if turnos_nuevos_detectados:
+        resumen_turnos = "\n".join(lineas_resumen)
+        mensaje = (
+            "🔔 <b>¡NUEVO TURNO DISPONIBLE EN CABA!</b> 🔔\n\n"
+            f"📍 <b>Lugar:</b> {NOMBRE_POLIDEPORTIVO}\n"
+            f"🎾 <b>Cancha:</b> {cancha['nombre']}\n\n"
+            f"<b>Disponibilidad encontrada:</b>\n{resumen_turnos}\n\n"
+            f"🔗 <a href='{cancha['url']}'>RESERVAR AHORA EN SIGECI</a>"
+        )
+        enviar_mensaje_telegram(mensaje)
+
+        for t in turnos_nuevos_detectados:
+            TURNOS_NOTIFICADOS.add(t)
+
+        print(f"¡ALERTA ENVIADA! Se encontraron {len(turnos_nuevos_detectados)} turnos nuevos en {cancha['nombre']}.")
+    elif lineas_resumen:
+        print(f"Verificación OK: Hay turnos en {cancha['nombre']} de {NOMBRE_POLIDEPORTIVO}, pero ya fueron notificados.")
+    else:
+        print(f"Verificación OK: Sin disponibilidad en {cancha['nombre']} de {NOMBRE_POLIDEPORTIVO}.")
 
 
 if __name__ == "__main__":
-    print("Iniciando monitoreo estricto de precisión para Polideportivo Onega...")
+    nombres_canchas = ", ".join([c["nombre"] for c in CANCHAS])
+    print(f"Iniciando monitoreo de {NOMBRE_POLIDEPORTIVO} para: {nombres_canchas}...")
+
     enviar_mensaje_telegram(
-        "🚀 Bot actualizado con filtro anti-falsos positivos. Listo para monitorear."
+        f"🚀 <b>Bot Activo:</b> Monitoreando {NOMBRE_POLIDEPORTIVO} ({nombres_canchas}) sin alertas repetidas cada 5 min."
     )
 
     while True:
-        consultar_turnos_exactos()
-        time.sleep(300)  # Revisa cada 5 minutos
+        for cancha in CANCHAS:
+            consultar_cancha(cancha)
+            time.sleep(1)
+
+        time.sleep(300)
