@@ -1,12 +1,12 @@
+import re
 import time
 import requests
 
-# CREDENCIALES CONFIGURADAS
 TELEGRAM_TOKEN = "8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M"
 TELEGRAM_CHAT_ID = "8295036704"
 ID_PRESTACION = "3137"
 
-URL_BASE = "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite"
+URL_TRAMITE = f"https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion={ID_PRESTACION}"
 
 
 def enviar_mensaje_telegram(mensaje):
@@ -19,109 +19,77 @@ def enviar_mensaje_telegram(mensaje):
         print(f"Error enviando mensaje a Telegram: {e}")
 
 
-def consultar_turnos_detallados():
-    """Consulta las fechas y horarios específicos disponibles en la API interna de SIGECI."""
-    session = requests.Session()
-
+def consultar_turnos_estables():
+    """Analiza la página principal buscando fechas y horarios sin consumir endpoints protegidos."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{URL_BASE}?idPrestacion={ID_PRESTACION}",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9",
     }
 
     try:
-        # 1. Petición inicial a la página para obtener las cookies de sesión
-        url_inicio = f"{URL_BASE}?idPrestacion={ID_PRESTACION}"
-        session.get(url_inicio, headers=headers, timeout=15)
+        response = requests.get(URL_TRAMITE, headers=headers, timeout=15)
 
-        # 2. Consultar las fechas disponibles
-        url_fechas = f"{URL_BASE}/ObtenerFechas"
-        params_fechas = {"idPrestacion": ID_PRESTACION}
+        if response.status_code == 200:
+            html = response.text
 
-        resp_fechas = session.get(
-            url_fechas, params=params_fechas, headers=headers, timeout=15
-        )
+            # Frases que confirman que la agenda está cerrada o sin cupos
+            frases_sin_turnos = [
+                "no hay turnos disponibles",
+                "no existen turnos disponibles",
+                "sin turnos disponibles",
+                "no se encontraron turnos",
+            ]
 
-        if resp_fechas.status_code == 200:
-            try:
-                fechas_data = resp_fechas.json()
-            except Exception:
-                fechas_data = []
+            sin_turnos = any(
+                frase in html.lower() for frase in frases_sin_turnos
+            )
 
-            # Si se encuentran fechas disponibles
-            if fechas_data and isinstance(fechas_data, list) and len(fechas_data) > 0:
-                mensaje = "🎾 <b>¡TURNOS ENCONTRADOS EN ONEGA!</b> 🎾\n\n"
-                turnos_encontrados = False
+            # Extraer fechas visibles en formato DD/MM/YYYY o YYYY-MM-DD mediante expresión regular
+            fechas_encontradas = re.findall(
+                r"\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", html
+            )
+            # Eliminar duplicados
+            fechas_unicas = list(set(fechas_encontradas))
 
-                # 3. Iterar cada fecha para obtener sus horarios correspondientes
-                for f in fechas_data:
-                    # 'f' suele ser un string con la fecha o un diccionario según la respuesta de la API
-                    fecha_str = f.get("fecha") if isinstance(f, dict) else str(f)
+            # Extraer posibles horarios (formatos HH:MM)
+            horarios_encontrados = re.findall(
+                r"\b(?:[01]?\d|2[03]):[05]0\b", html
+            )
+            horarios_unicos = list(set(horarios_encontrados))
 
-                    url_horarios = f"{URL_BASE}/ObtenerHorarios"
-                    params_horarios = {
-                        "idPrestacion": ID_PRESTACION,
-                        "fecha": fecha_str,
-                    }
+            if not sin_turnos or len(fechas_unicas) > 0:
+                mensaje = "🎾 <b>¡TURNOS DETECTADOS EN POLIDEPORTIVO ONEGA!</b> 🎾\n\n"
 
-                    resp_horarios = session.get(
-                        url_horarios,
-                        params=params_horarios,
-                        headers=headers,
-                        timeout=15,
-                    )
+                if fechas_unicas:
+                    mensaje += f"📅 <b>Fechas detectadas:</b> {', '.join(fechas_unicas[:5])}\n"
+                if horarios_unicos:
+                    mensaje += f"⏰ <b>Horarios aproximados:</b> {', '.join(horarios_unicos[:6])}\n"
 
-                    if resp_horarios.status_code == 200:
-                        try:
-                            horarios_data = resp_horarios.json()
-                        except Exception:
-                            horarios_data = []
+                mensaje += f"\n🔗 <a href='{URL_TRAMITE}'>Ingresar rápido a reservar en SIGECI</a>"
 
-                        if horarios_data and isinstance(horarios_data, list):
-                            horarios_lista = []
-                            for h in horarios_data:
-                                hora = h.get("hora") if isinstance(h, dict) else str(h)
-                                horarios_lista.append(hora)
-
-                            if horarios_lista:
-                                turnos_encontrados = True
-                                horarios_texto = ", ".join(horarios_lista)
-                                mensaje += f"📅 <b>Fecha:</b> {fecha_str}\n⏰ <b>Horarios:</b> {horarios_texto}\n\n"
-
-                if turnos_encontrados:
-                    mensaje += f"🔗 <a href='{url_inicio}'>Ingresar para reservar en SIGECI</a>"
-                    enviar_mensaje_telegram(mensaje)
-                    print("¡Turnos detallados encontrados y mensaje enviado!")
-                else:
-                    # Había fechas pero sin horarios confirmados
-                    mensaje_generico = (
-                        "🎾 <b>¡FECHAS DETECTADAS EN ONEGA!</b> 🎾\n\n"
-                        f"Se detectaron fechas en el sistema. Revisa la web directamente:\n{url_inicio}"
-                    )
-                    enviar_mensaje_telegram(mensaje_generico)
-                    print("Se detectaron fechas pero no se obtuvieron horarios detallados.")
-
+                enviar_mensaje_telegram(mensaje)
+                print(
+                    "¡Notificación enviada a Telegram! Se detectó disponibilidad."
+                )
             else:
-                print("No hay fechas ni turnos disponibles en este momento.")
+                print("Consulta exitosa (Estado 200): No hay turnos en este momento.")
 
         else:
-            print(f"El servidor de SIGECI respondió con código: {resp_fechas.status_code}")
+            print(f"Respuesta inesperada de SIGECI: Estado {response.status_code}")
 
     except Exception as e:
-        print(f"Error consultando turnos: {e}")
+        print(f"Error durante la verificación: {e}")
 
 
 if __name__ == "__main__":
-    print("Iniciando monitoreo detallado de turnos de tenis en Polideportivo Onega...")
-    enviar_mensaje_telegram(
-        "🚀 Bot actualizado: Ahora verificará fechas y horarios exactos disponibles."
-    )
+    print("Servidor activo. Monitoreando Polideportivo Onega cada 5 minutos...")
+    enviar_mensaje_telegram("🚀 Bot de tenis activo con modo de escaneo estable.")
 
     while True:
-        consultar_turnos_detallados()
-        time.sleep(300)  # Consulta cada 5 minutos
+        consultar_turnos_estables()
+        time.sleep(300)
