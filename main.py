@@ -10,19 +10,29 @@ TELEGRAM_TOKEN = os.environ.get("8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M"
 TELEGRAM_CHAT_ID = os.environ.get("8295036704")
 
 NOMBRE_POLIDEPORTIVO = "Polideportivo Onega"
-SEDE_ID = "2280"  # Sede identificada para Onega
+SEDE_ID = "2280"
 
-# CONFIGURACIÓN DE CANCHAS DE ONEGA
+# Mapeo de IDs posibles para las canchas de Onega
 CANCHAS = [
     {
-        "nombre": "Cancha 1",
-        "servicio_id": "3151",  # Servicio identificado para la Cancha 1
+        "nombre": "Cancha (ID 3150)",
+        "servicio_id": "3150",
+        "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3150"
+    },
+    {
+        "nombre": "Cancha (ID 3151)",
+        "servicio_id": "3151",
         "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3151"
     },
     {
-        "nombre": "Cancha 2",
-        "servicio_id": "3152",  # Servicio correlativo para la Cancha 2
+        "nombre": "Cancha (ID 3152)",
+        "servicio_id": "3152",
         "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3152"
+    },
+    {
+        "nombre": "Cancha (ID 3153)",
+        "servicio_id": "3153",
+        "url": "https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion=3153"
     }
 ]
 
@@ -91,6 +101,7 @@ def consultar_cancha(cancha):
     lineas_resumen = []
     turnos_nuevos_detectados = []
     turnos_visibles_hoy = set()
+    consulta_exitosa = False
 
     for i in range(DIAS_A_CONSULTAR):
         fecha_str = (hoy + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -108,6 +119,8 @@ def consultar_cancha(cancha):
             if response.status_code == 200:
                 try:
                     datos = response.json()
+                    if isinstance(datos, list):
+                        consulta_exitosa = True
                 except Exception:
                     datos = []
 
@@ -124,11 +137,15 @@ def consultar_cancha(cancha):
                     lineas_resumen.append(texto_linea)
 
         except Exception as e:
-            print(f"Error consultando {cancha['nombre']} ({fecha_str}): {e}")
+            pass
 
-        time.sleep(0.1)
+        time.sleep(0.05)
 
-    # Limpiar de la memoria los turnos que ya fueron tomados
+    if not consulta_exitosa:
+        print(f"⚠️ {cancha['nombre']}: ID de servicio inactivo o no responde.")
+        return
+
+    # Limpiar memoria de turnos tomados
     turnos_a_remover = [
         t for t in TURNOS_NOTIFICADOS 
         if t.startswith(f"{cancha['nombre']}|") and t not in turnos_visibles_hoy
@@ -136,13 +153,13 @@ def consultar_cancha(cancha):
     for t in turnos_a_remover:
         TURNOS_NOTIFICADOS.remove(t)
 
-    # Enviar alerta únicamente si hay turnos nuevos
+    # Notificar únicamente si hay turnos nuevos
     if turnos_nuevos_detectados:
         resumen_turnos = "\n".join(lineas_resumen)
         mensaje = (
             "🔔 <b>¡NUEVO TURNO DISPONIBLE EN CABA!</b> 🔔\n\n"
             f"📍 <b>Lugar:</b> {NOMBRE_POLIDEPORTIVO}\n"
-            f"🎾 <b>Cancha:</b> {cancha['nombre']}\n\n"
+            f"🎾 <b>Opción:</b> {cancha['nombre']}\n\n"
             f"<b>Disponibilidad encontrada:</b>\n{resumen_turnos}\n\n"
             f"🔗 <a href='{cancha['url']}'>RESERVAR AHORA EN SIGECI</a>"
         )
@@ -157,11 +174,10 @@ def consultar_cancha(cancha):
 
 
 if __name__ == "__main__":
-    nombres_canchas = ", ".join([c["nombre"] for c in CANCHAS])
-    print(f"🚀 Iniciando monitoreo de {NOMBRE_POLIDEPORTIVO} ({nombres_canchas})...")
+    print(f"🚀 Iniciando monitoreo multicancha para {NOMBRE_POLIDEPORTIVO}...")
 
     enviar_mensaje_telegram(
-        f"🚀 <b>Bot Activo:</b> Monitoreando {NOMBRE_POLIDEPORTIVO} ({nombres_canchas}) sin alertas repetidas cada 5 minutos."
+        f"🚀 <b>Bot Activo:</b> Monitoreando todas las opciones de cancha en {NOMBRE_POLIDEPORTIVO} cada 5 minutos."
     )
 
     while True:
@@ -172,4 +188,4 @@ if __name__ == "__main__":
         except Exception as main_e:
             print(f"❌ Error en el bucle principal: {main_e}")
 
-        time.sleep(300)  # Chequeo cada 5 minutos
+        time.sleep(300)
