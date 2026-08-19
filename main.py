@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = "8295036704"
 NOMBRE_POLIDEPORTIVO = "Polideportivo Onega"
 SEDE_ID = "2280"
 
-# Rango ampliado de IDs de servicio para cubrir todas las canchas de Onega
+# IDs de servicio activos conocidos y rango de reserva para Onega
 SERVICIOS_IDS = [
     "3135", "3136", "3137", "3138", "3139", "3140",
     "3150", "3151", "3152", "3153", "3154", "3155"
@@ -29,8 +29,8 @@ DIAS_SEMANA = {
 
 def enviar_mensaje_telegram(mensaje):
     """Envía un mensaje a Telegram en formato HTML."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Error: Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Railway.")
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN.startswith("COLOCA_AQUI"):
+        print("❌ Error: Debes ingresar tu TELEGRAM_TOKEN en el archivo main.py.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -43,31 +43,59 @@ def enviar_mensaje_telegram(mensaje):
         return False
 
 
-def formatear_horarios(fecha_str, lista_iso):
-    """Convierte fechas ISO a texto legible y genera claves para la memoria."""
-    lineas_texto = []
-    claves_turnos = []
+def extraer_horas_validas(lista_datos):
+    """
+    Valida estrictamente que los elementos recibidos sean cadenas de tiempo/ISO reales.
+    Filtra objetos estructurados o metadatos falsos.
+    """
+    horas_validas = []
+    
+    if not isinstance(lista_datos, list):
+        return horas_validas
 
+    for item in lista_datos:
+        if not isinstance(item, str):
+            continue
+
+        item_str = item.strip()
+        
+        # Formato ISO tipico de SIGECI: 2026-08-22T08:30:00 o HH:MM:SS
+        if "T" in item_str:
+            try:
+                dt_hora = datetime.strptime(item_str.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                horas_validas.append(dt_hora.strftime("%H:%M hs"))
+            except ValueError:
+                pass
+        elif ":" in item_str and len(item_str) <= 8:
+            try:
+                partes = item_str.split(":")
+                hora_str = f"{int(partes[0]):02d}:{int(partes[1]):02d} hs"
+                horas_validas.append(hora_str)
+            except ValueError:
+                pass
+
+    return horas_validas
+
+
+def formatear_horarios(fecha_str, lista_iso):
+    """Convierte fechas e ISOs validados a texto legible y claves de memoria."""
+    horas_limpias = extraer_horas_validas(lista_iso)
+    if not horas_limpias:
+        return None, []
+
+    claves_turnos = []
     try:
         dt_fecha = datetime.strptime(fecha_str, "%Y-%m-%d")
         dia_nombre = DIAS_SEMANA.get(dt_fecha.strftime("%A"), dt_fecha.strftime("%A"))
         fecha_corta = dt_fecha.strftime("%d/%m")
 
-        horas_limpias = []
-        for item in lista_iso:
-            try:
-                dt_hora = datetime.strptime(str(item).split(".")[0], "%Y-%m-%dT%H:%M:%S")
-                hora_str = dt_hora.strftime("%H:%M hs")
-                horas_limpias.append(hora_str)
-                claves_turnos.append((fecha_str, hora_str))
-            except Exception:
-                horas_limpias.append(str(item))
-                claves_turnos.append((fecha_str, str(item)))
+        for h in horas_limpias:
+            claves_turnos.append((fecha_str, h))
 
         texto = f"📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas_limpias)}"
         return texto, claves_turnos
-    except Exception as e:
-        return f"📅 <b>{fecha_str}:</b> {lista_iso}", [(fecha_str, str(lista_iso))]
+    except Exception:
+        return None, []
 
 
 def consultar_cancha(servicio_id):
@@ -112,14 +140,15 @@ def consultar_cancha(servicio_id):
                 if datos and isinstance(datos, list) and len(datos) > 0:
                     texto_linea, claves = formatear_horarios(fecha_str, datos)
 
-                    for f, h in claves:
-                        clave_unica = f"{servicio_id}|{f}|{h}"
-                        turnos_visibles_hoy.add(clave_unica)
+                    if texto_linea and claves:
+                        for f, h in claves:
+                            clave_unica = f"{servicio_id}|{f}|{h}"
+                            turnos_visibles_hoy.add(clave_unica)
 
-                        if clave_unica not in TURNOS_NOTIFICADOS:
-                            turnos_nuevos_detectados.append(clave_unica)
+                            if clave_unica not in TURNOS_NOTIFICADOS:
+                                turnos_nuevos_detectados.append(clave_unica)
 
-                    lineas_resumen.append(texto_linea)
+                        lineas_resumen.append(texto_linea)
 
         except Exception:
             pass
@@ -127,9 +156,9 @@ def consultar_cancha(servicio_id):
         time.sleep(0.05)
 
     if not consulta_exitosa:
-        return  # Si el ID está inactivo en la API, se ignora en silencio
+        return
 
-    # Limpiar memoria de turnos tomados
+    # Limpiar memoria de turnos tomados que ya no existen en la web
     turnos_a_remover = [
         t for t in TURNOS_NOTIFICADOS 
         if t.startswith(f"{servicio_id}|") and t not in turnos_visibles_hoy
@@ -137,7 +166,7 @@ def consultar_cancha(servicio_id):
     for t in turnos_a_remover:
         TURNOS_NOTIFICADOS.remove(t)
 
-    # Notificar únicamente si hay turnos nuevos
+    # Notificar ÚNICAMENTE si hay turnos reales confirmados
     if turnos_nuevos_detectados:
         resumen_turnos = "\n".join(lineas_resumen)
         mensaje = (
@@ -150,18 +179,18 @@ def consultar_cancha(servicio_id):
         if enviar_mensaje_telegram(mensaje):
             for t in turnos_nuevos_detectados:
                 TURNOS_NOTIFICADOS.add(t)
-            print(f"✅ ALERTA ENVIADA: {len(turnos_nuevos_detectados)} turnos nuevos en {nombre_cancha}.")
+            print(f"✅ ALERTA ENVIADA: {len(turnos_nuevos_detectados)} turnos reales en {nombre_cancha}.")
     elif lineas_resumen:
         print(f"ℹ️ {nombre_cancha}: Hay turnos libres pero ya fueron notificados.")
     else:
-        print(f"ℹ️ {nombre_cancha}: Sin disponibilidad.")
+        print(f"ℹ️ {nombre_cancha}: Sin disponibilidad real.")
 
 
 if __name__ == "__main__":
-    print(f"🚀 Iniciando monitoreo ampliado para {NOMBRE_POLIDEPORTIVO}...")
+    print(f"🚀 Iniciando monitoreo estricto para {NOMBRE_POLIDEPORTIVO}...")
 
     enviar_mensaje_telegram(
-        f"🚀 <b>Bot Activo:</b> Monitoreando catálogo completo de canchas en {NOMBRE_POLIDEPORTIVO}."
+        f"🚀 <b>Bot Activo:</b> Monitoreando disponibilidad en {NOMBRE_POLIDEPORTIVO}."
     )
 
     while True:
