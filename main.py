@@ -14,10 +14,8 @@ CANCHAS = [
     {"id": "2290", "nombre": "Cancha 2"}
 ]
 
-# Rango de días a consultar
 DIAS_A_CONSULTAR = 30
 
-# Variables de entorno de Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8679048960:AAHNy7YqRGx1Bt-oeKCr9xP29h0L-BnBE1M")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8295036704")
 
@@ -26,14 +24,17 @@ DIAS_SEMANA = {
     "Thursday": "Jueves", "Friday": "Viernes", "Saturday": "Sábado", "Sunday": "Domingo"
 }
 
-def enviar_notificacion_telegram(mensaje):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Error: Faltan las credenciales de Telegram.")
+LAST_UPDATE_ID = None
+
+def enviar_notificacion_telegram(mensaje, chat_id=None):
+    target_chat_id = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_TOKEN or not target_chat_id:
+        print("❌ Error: Faltan credenciales de Telegram.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": target_chat_id,
         "text": mensaje,
         "parse_mode": "HTML",
         "disable_web_page_preview": False
@@ -63,7 +64,6 @@ def crear_sesion_sigeci():
     return session
 
 def extraer_horas_validas(lista_datos):
-    """Limpia y parsea el formato retornado por la API del SIGECI"""
     horas_validas = []
     if not isinstance(lista_datos, list):
         return horas_validas
@@ -74,14 +74,12 @@ def extraer_horas_validas(lista_datos):
 
         item_str = item.strip()
 
-        # Si viene en formato ISO: "2026-08-24T14:00:00.0000000"
         if "T" in item_str:
             try:
                 dt_hora = datetime.strptime(item_str.split(".")[0], "%Y-%m-%dT%H:%M:%S")
                 horas_validas.append(dt_hora.strftime("%H:%M hs"))
             except ValueError:
                 pass
-        # Si viene en formato corto: "14:00:00"
         elif ":" in item_str and len(item_str) <= 8:
             try:
                 partes = item_str.split(":")
@@ -111,7 +109,8 @@ def consultar_turnos_cancha(session, sede_id, fecha_str):
         print(f"Error al consultar sede {sede_id} para la fecha {fecha_str}: {e}")
     return []
 
-def monitorear_onega():
+def escanear_disponibilidad():
+    """Realiza la consulta completa de turnos en SIGECI y devuelve el resultado formateado."""
     session = crear_sesion_sigeci()
     url_reserva = f"https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion={SERVICIO_ID}&flow=primeros"
 
@@ -142,15 +141,69 @@ def monitorear_onega():
 
     if lineas_notificacion:
         resumen = "\n".join(lineas_notificacion)
-        mensaje = (
-            f"🔔 <b>¡TURNOS ENCONTRADOS EN {NOMBRE_POLIDEPORTIVO.upper()}!</b> 🔔\n\n"
+        return (
+            f"🔔 <b>¡TURNOS DISPONIBLES EN {NOMBRE_POLIDEPORTIVO.upper()}!</b> 🔔\n\n"
             f"{resumen}\n\n"
             f"🔗 <a href='{url_reserva}'>RESERVAR AHORA EN SIGECI</a>"
         )
-        enviar_notificacion_telegram(mensaje)
-        print("✅ Alerta enviada correctamente por Telegram.")
     else:
-        print("ℹ️ Sin turnos disponibles por el momento.")
+        hora_actual = datetime.now().strftime("%H:%M:%S")
+        return (
+            f"❌ <b>Sin turnos disponibles en {NOMBRE_POLIDEPORTIVO}</b>\n\n"
+            f"<i>Última verificación: {hora_actual} hs (Próximos {DIAS_A_CONSULTAR} días).</i>"
+        )
+
+def procesar_mensajes_telegram():
+    """Escucha mensajes entrantes en el bot de Telegram."""
+    global LAST_UPDATE_ID
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 5, "offset": LAST_UPDATE_ID}
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            for update in data.get("result", []):
+                LAST_UPDATE_ID = update["update_id"] + 1
+                message = update.get("message", {})
+                chat_id = str(message.get("chat", {}).get("id"))
+                texto = message.get("text", "").strip().lower()
+
+                if texto:
+                    print(f"📩 Mensaje recibido de Chat ID {chat_id}: '{texto}'")
+                    # Enviar mensaje de espera temporal mientras escanea
+                    enviar_notificacion_telegram("🔎 Consultando la disponibilidad en el SIGECI, aguarda un momento...", chat_id=chat_id)
+                    
+                    # Escanear y enviar respuesta
+                    respuesta = escanear_disponibilidad()
+                    enviar_notificacion_telegram(respuesta, chat_id=chat_id)
+    except Exception as e:
+        print(f"⚠️ Error al verificar mensajes de Telegram: {e}")
+
+def bucle_principal():
+    print(f"🚀 Bot iniciado en {NOMBRE_POLIDEPORTIVO}. Escuchando mensajes...")
+    enviar_notificacion_telegram(f"🤖 <b>Bot Activo en {NOMBRE_POLIDEPORTIVO}:</b> Envíame cualquier mensaje o el comando /turnos para consultar la disponibilidad actual.")
+
+    # Timer para escaneo automático programado (cada 15 minutos)
+    ULTIMO_ESCANEO = 0
+    INTERVALO_ESCANEO = 900  # 15 minutos en segundos
+
+    while True:
+        # 1. Escuchar si el usuario escribió un mensaje
+        procesar_mensajes_telegram()
+
+        # 2. Escaneo automático programado
+        tiempo_actual = time.time()
+        if tiempo_actual - ULTIMO_ESCANEO >= INTERVALO_ESCANEO:
+            print("⏰ Ejecutando escaneo automático programado...")
+            resultado = escanear_disponibilidad()
+            # Solo notificar automáticamente si se encontraron turnos
+            if "¡TURNOS DISPONIBLES" in resultado:
+                enviar_notificacion_telegram(resultado)
+            ULTIMO_ESCANEO = tiempo_actual
+
+        time.sleep(2)
 
 if __name__ == "__main__":
-    monitorear_onega()
+    bucle_principal()
