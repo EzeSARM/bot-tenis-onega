@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta
 
 # ==========================================
-# CONFIGURACIÓN DEL POLIDEPORTIVO ONEGA
+# CONFIGURACIÓN Y CREDENCIALES - ONEGA
 # ==========================================
 NOMBRE_POLIDEPORTIVO = "Polideportivo Onega"
 SERVICIO_ID = "3137"
@@ -25,6 +25,7 @@ DIAS_SEMANA = {
 }
 
 LAST_UPDATE_ID = None
+TURNOS_NOTIFICADOS = set()  # Memoria de turnos ya informados
 
 def enviar_notificacion_telegram(mensaje, chat_id=None):
     target_chat_id = chat_id or TELEGRAM_CHAT_ID
@@ -109,8 +110,9 @@ def consultar_turnos_cancha(session, sede_id, fecha_str):
         print(f"Error al consultar sede {sede_id} para la fecha {fecha_str}: {e}")
     return []
 
-def escanear_disponibilidad():
-    """Realiza la consulta completa de turnos en SIGECI y devuelve el resultado formateado."""
+def obtener_estado_turnos():
+    """Realiza la búsqueda y retorna los turnos visibles, nuevos y el texto formateado."""
+    global TURNOS_NOTIFICADOS
     session = crear_sesion_sigeci()
     url_reserva = f"https://formulario-sigeci.buenosaires.gob.ar/AgendarTramite?idPrestacion={SERVICIO_ID}&flow=primeros"
 
@@ -119,43 +121,44 @@ def escanear_disponibilidad():
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Escaneando turnos en {NOMBRE_POLIDEPORTIVO}...")
 
-    lineas_notificacion = []
+    lineas_todas = []
+    lineas_nuevas = []
+    turnos_visibles_actualmente = set()
 
     for cancha in CANCHAS:
         for fecha in fechas_a_consultar:
             horas = consultar_turnos_cancha(session, cancha["id"], fecha)
             if horas:
-                try:
-                    dt_fecha = datetime.strptime(fecha, "%Y-%m-%d")
-                    dia_nombre = DIAS_SEMANA.get(dt_fecha.strftime("%A"), dt_fecha.strftime("%A"))
-                    fecha_corta = dt_fecha.strftime("%d/%m")
-                    lineas_notificacion.append(
-                        f"🎾 <b>{cancha['nombre']}</b> - 📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas)}"
-                    )
-                except Exception:
-                    lineas_notificacion.append(
-                        f"🎾 <b>{cancha['nombre']}</b> - 📅 <b>{fecha}:</b> {', '.join(horas)}"
+                dt_fecha = datetime.strptime(fecha, "%Y-%m-%d")
+                dia_nombre = DIAS_SEMANA.get(dt_fecha.strftime("%A"), dt_fecha.strftime("%A"))
+                fecha_corta = dt_fecha.strftime("%d/%m")
+
+                horas_nuevas_cancha = []
+                for h in horas:
+                    clave_unica = f"{cancha['id']}|{fecha}|{h}"
+                    turnos_visibles_actualmente.add(clave_unica)
+                    if clave_unica not in TURNOS_NOTIFICADOS:
+                        horas_nuevas_cancha.append(h)
+
+                lineas_todas.append(
+                    f"🎾 <b>{cancha['nombre']}</b> - 📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas)}"
+                )
+
+                if horas_nuevas_cancha:
+                    lineas_nuevas.append(
+                        f"🎾 <b>{cancha['nombre']}</b> - 📅 <b>{dia_nombre} {fecha_corta}:</b> {', '.join(horas_nuevas_cancha)}"
                     )
 
             time.sleep(0.05)
 
-    if lineas_notificacion:
-        resumen = "\n".join(lineas_notificacion)
-        return (
-            f"🔔 <b>¡TURNOS DISPONIBLES EN {NOMBRE_POLIDEPORTIVO.upper()}!</b> 🔔\n\n"
-            f"{resumen}\n\n"
-            f"🔗 <a href='{url_reserva}'>RESERVAR AHORA EN SIGECI</a>"
-        )
-    else:
-        hora_actual = datetime.now().strftime("%H:%M:%S")
-        return (
-            f"❌ <b>Sin turnos disponibles en {NOMBRE_POLIDEPORTIVO}</b>\n\n"
-            f"<i>Última verificación: {hora_actual} hs (Próximos {DIAS_A_CONSULTAR} días).</i>"
-        )
+    # Limpiar memoria de turnos que ya fueron reservados o vencieron
+    TURNOS_NOTIFICADOS = TURNOS_NOTIFICADOS.intersection(turnos_visibles_actualmente)
+
+    return lineas_todas, lineas_nuevas, turnos_visibles_actualmente, url_reserva
 
 def procesar_mensajes_telegram():
-    """Escucha mensajes entrantes en el bot de Telegram."""
-    global LAST_UPDATE_ID
+    """Responde cuando tú haces una consulta directa."""
+    global LAST_UPDATE_ID, TURNOS_NOTIFICADOS
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
     params = {"timeout": 5, "offset": LAST_UPDATE_ID}
@@ -172,35 +175,60 @@ def procesar_mensajes_telegram():
 
                 if texto:
                     print(f"📩 Mensaje recibido de Chat ID {chat_id}: '{texto}'")
-                    # Enviar mensaje de espera temporal mientras escanea
                     enviar_notificacion_telegram("🔎 Consultando la disponibilidad en el SIGECI, aguarda un momento...", chat_id=chat_id)
                     
-                    # Escanear y enviar respuesta
-                    respuesta = escanear_disponibilidad()
-                    enviar_notificacion_telegram(respuesta, chat_id=chat_id)
+                    lineas_todas, _, turnos_visibles, url_reserva = obtener_estado_turnos()
+                    
+                    if lineas_todas:
+                        TURNOS_NOTIFICADOS.update(turnos_visibles)
+                        resumen = "\n".join(lineas_todas)
+                        mensaje = (
+                            f"🔔 <b>¡TURNOS DISPONIBLES EN {NOMBRE_POLIDEPORTIVO.upper()}!</b> 🔔\n\n"
+                            f"{resumen}\n\n"
+                            f"🔗 <a href='{url_reserva}'>RESERVAR AHORA EN SIGECI</a>"
+                        )
+                    else:
+                        hora_actual = datetime.now().strftime("%H:%M:%S")
+                        mensaje = (
+                            f"❌ <b>Sin turnos disponibles en {NOMBRE_POLIDEPORTIVO}</b>\n\n"
+                            f"<i>Última verificación: {hora_actual} hs (Próximos {DIAS_A_CONSULTAR} días).</i>"
+                        )
+                    
+                    enviar_notificacion_telegram(mensaje, chat_id=chat_id)
     except Exception as e:
         print(f"⚠️ Error al verificar mensajes de Telegram: {e}")
 
 def bucle_principal():
+    global TURNOS_NOTIFICADOS
     print(f"🚀 Bot iniciado en {NOMBRE_POLIDEPORTIVO}. Escuchando mensajes...")
-    enviar_notificacion_telegram(f"🤖 <b>Bot Activo en {NOMBRE_POLIDEPORTIVO}:</b> Envíame cualquier mensaje o el comando /turnos para consultar la disponibilidad actual.")
+    enviar_notificacion_telegram(f"🤖 <b>Bot Activo en {NOMBRE_POLIDEPORTIVO}:</b> Envíame cualquier mensaje para consultar la disponibilidad actual.")
 
-    # Timer para escaneo automático programado (cada 15 minutos)
     ULTIMO_ESCANEO = 0
-    INTERVALO_ESCANEO = 900  # 15 minutos en segundos
+    INTERVALO_ESCANEO = 900  # 15 minutos
 
     while True:
-        # 1. Escuchar si el usuario escribió un mensaje
+        # 1. Escuchar consultas directas
         procesar_mensajes_telegram()
 
-        # 2. Escaneo automático programado
+        # 2. Escaneo automático silencioso
         tiempo_actual = time.time()
         if tiempo_actual - ULTIMO_ESCANEO >= INTERVALO_ESCANEO:
-            print("⏰ Ejecutando escaneo automático programado...")
-            resultado = escanear_disponibilidad()
-            # Solo notificar automáticamente si se encontraron turnos
-            if "¡TURNOS DISPONIBLES" in resultado:
-                enviar_notificacion_telegram(resultado)
+            print("⏰ Ejecutando escaneo automático en segundo plano...")
+            _, lineas_nuevas, turnos_visibles, url_reserva = obtener_estado_turnos()
+            
+            if lineas_nuevas:
+                resumen_nuevos = "\n".join(lineas_nuevas)
+                mensaje_alerta = (
+                    f"🚨 <b>¡NUEVOS TURNOS DETECTADOS EN {NOMBRE_POLIDEPORTIVO.upper()}!</b> 🚨\n\n"
+                    f"{resumen_nuevos}\n\n"
+                    f"🔗 <a href='{url_reserva}'>RESERVAR AHORA EN SIGECI</a>"
+                )
+                enviar_notificacion_telegram(mensaje_alerta)
+                TURNOS_NOTIFICADOS.update(turnos_visibles)
+                print(f"✅ Notificación enviada: {len(lineas_nuevas)} grupo(s) de turnos nuevos.")
+            else:
+                print("ℹ️ Sin turnos nuevos para notificar.")
+
             ULTIMO_ESCANEO = tiempo_actual
 
         time.sleep(2)
